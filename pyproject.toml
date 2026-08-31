@@ -1,0 +1,38 @@
+[project]
+name = "football-predict"
+version = "0.1.0"
+description = "足球数据 RAG 知识库 + 比赛预测 + 统计分析（Web 服务）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "streamlit>=1.33",
+    "chromadb>=0.4.24",
+    "langchain>=0.2",
+    "langchain-community>=0.2",
+    "langchain-text-splitters>=0.2",
+    "langchain-chroma>=0.1",
+    "dashscope>=1.17",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+football-predict = "app.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
