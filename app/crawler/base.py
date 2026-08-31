@@ -20,10 +20,16 @@ class BaseCrawler(ABC):
         self.name = name
 
     @abstractmethod
-    def fetch_matches(self, league: str | None = None, season: str | None = None) -> list[Match]:
+    def fetch_matches(
+        self,
+        period: str | None = None,
+        league: str | None = None,
+        season: str | None = None,
+    ) -> list[Match]:
         """抓取比赛记录。
 
-        参数：
+        参数（各数据源按需使用，含义见具体实现）：
+        - period: 期号（如 500 彩票网足彩期号）
         - league: 联赛名过滤，None 表示全部
         - season: 赛季过滤，None 表示全部
 

@@ -3,17 +3,14 @@
 ## 总体
 
 ```
-Streamlit 前端 ──HTTP──> FastAPI 后端 ──> 预测 / 分析 / RAG
+Streamlit 前端 ──HTTP──> FastAPI 后端 ──> 预测 / 统计 / agent
                                 │
-        ┌───────────────────────┼────────────────────────┐
-     爬虫(crawler)          存储(storage)          ChromaDB(向量库)
-    抓取比赛/赔率     ──落库──> SQLite(比赛/赔率) <──读取──  文本知识(RAG)
+                     ┌──────────┼─────────────┐
+                  爬虫(crawler)  存储(storage)    LLM(DeepSeek)
+               抓取比赛/赔率/球员 ──落库──> SQLite <──读取──
 ```
 
-四层：**接入层**（api + web）、**采集层**（crawler）、**存储层**（storage：SQLite + ChromaDB）、**业务层**（predict / analysis / rag）。
-
-> 数据职责划分：结构化比赛/赔率存 **SQLite**（需按球队/日期/赔率做关系查询与聚合），
-> 文本知识存 **ChromaDB**（需语义相似检索）。两者各司其职，不混用。
+分层：**接入层**（api + web）、**采集层**（crawler）、**存储层**（storage：SQLite）、**业务层**（predict / analysis / agent）。
 
 ## 模块与文件对照
 
@@ -22,81 +19,55 @@ Streamlit 前端 ──HTTP──> FastAPI 后端 ──> 预测 / 分析 / RAG
 | `main.py` | `app` / `main()` | FastAPI 装配与启动入口 |
 | `core/config.py` | `Settings` / `get_settings()` | 配置单例，读环境变量 |
 | `core/http.py` | `HttpClient` | 统一 HTTP 客户端（超时/重试/限流，爬虫与 LLM 复用） |
-| `core/logging.py` | `setup_logging()` | 日志配置 |
-| `api/schemas.py` | `ChatRequest` 等 | Pydantic 请求模型 |
+| `api/schemas.py` | `PredictRequest` 等 | Pydantic 请求模型 |
 | `api/router.py` | 路由函数 | 8 个端点，解析请求并转发业务 |
-| `models/match.py` | `Match` | 比赛数据模型 |
+| `models/match.py` | `Match` | 比赛数据模型（含状态/半场比分） |
 | `models/odds.py` | `Odds` | 赔率数据模型（欧赔/亚盘/大小球） |
+| `models/player.py` | `Player` | 球员数据模型（含出场/进球/助攻） |
+| `models/team_alias.py` | `resolve_team()` | 球队别名映射（全名/简称统一） |
 | `crawler/base.py` | `BaseCrawler` | 采集接口 `fetch_matches()` |
-| `crawler/mock_crawler.py` | `MockCrawler` | 模拟数据源（验证链路） |
-| `storage/match_repository.py` | `MatchRepository` | SQLite 仓库：存/取比赛与赔率 |
+| `crawler/zucai_500.py` | `Zucai500Crawler` | 足彩期号爬虫（比赛/比分/赔率） |
+| `crawler/team_resolver.py` | `TeamNameResolver` | 球队名解析（ID → 完整名，带缓存） |
+| `crawler/team_lineup.py` | `TeamLineupCrawler` | 阵容爬虫（球员名单 + 赛季数据） |
+| `storage/match_repository.py` | `MatchRepository` | SQLite 仓库：比赛/赔率/球员 |
 | `predict/base.py` | `Predictor` | 预测接口（多模型可插拔） |
-| `predict/heuristic.py` | `HeuristicPredictor` | 启发式预测 |
+| `predict/poisson.py` | `PoissonPredictor` | 泊松 Dixon-Coles 模型 + 赔率融合 + 让球 |
 | `analysis/analyzer.py` | `Analyzer` | 球队统计 / 积分榜 |
-| `rag/embeddings.py` | `get_embeddings()` | DashScope 文本嵌入 |
-| `rag/vector_store.py` | `VectorStore` | ChromaDB 封装 |
-| `rag/llm.py` | `chat()` | LLM 调用（OpenAI 兼容） |
-| `rag/md5_utils.py` | MD5 工具函数 | 去重记录 |
-| `rag/rag_service.py` | `RagService` | RAG 问答 + 导入 |
-| `web/app.py` | Streamlit 页面 | 前端三 Tab |
+| `agent/llm.py` | `chat()` | DeepSeek LLM 客户端（函数调用） |
+| `agent/agent.py` | `PredictAgent` | 对话式预测 agent（工具调用编排） |
+| `web/app.py` | Streamlit 页面 | 前端 4 Tab |
 
-## 数据采集与存储（`app/crawler/` + `app/storage/`）
+## 数据采集与存储
 
-**采集**：`BaseCrawler`（`crawler/base.py`）定义统一接口 `fetch_matches()`，各数据源继承实现；
-真实来源待确定后放入 `crawler/sources/`，当前以 `MockCrawler` 跑通链路。
-
-**存储**：`MatchRepository`（`storage/match_repository.py`）是结构化数据的唯一入口，
-预测/统计通过 `load_matches()` 读取，爬虫通过 `save_matches()` / `save_odds()` 落库。
-
-**链路**：`爬虫 fetch → 存储 save → 业务 load → 预测/统计`，各层职责单一、可替换。
-
-## RAG 链路（`app/rag/`）
-
-**写入**：文本 → DashScope 嵌入 → ChromaDB 持久化
-
-**查询**：
-
-```
-question
-  → VectorStore.search() 检索 top-k 相似片段
-  → 拼接成上下文
-  → LLM（DashScope OpenAI 兼容接口）基于上下文生成回答
-  → 返回 {answer, sources}
-```
-
-| 模块 | 职责 |
-|---|---|
-| `embeddings.py` | DashScope 文本嵌入 |
-| `vector_store.py` | ChromaDB 封装（添加 / 检索 / 计数） |
-| `llm.py` | LLM 调用（OpenAI 兼容 `/chat/completions`） |
-| `rag_service.py` | `RagService`：检索 + 上下文 + 生成，对外统一入口 |
+- **比赛/赔率**：`Zucai500Crawler` 按期号抓取 `live.500.com/zucai.php`，解析对阵、全场/半场比分、胜平负赔率、状态，映射为 `Match` + `Odds`。
+- **球队名**：`TeamNameResolver` 按球队 ID 抓球队页取完整简体名（缓存 `data/team_names.json`）；`team_alias` 再做简称/全名归一。
+- **球员**：`TeamLineupCrawler` 抓球队阵容页，解析球员名单（姓名/号码/位置/国籍/年龄/身高/体重/身价 + 出场/进球/助攻）。
+- **存储**：`MatchRepository` 是唯一入口，`load_matches()` 默认排除国家队/世界杯联赛。
 
 ## 比赛预测（`app/predict/`）
 
-**当前实现**：基于历史战绩的启发式（主队历史胜率 vs 客队历史失利率，粗略估算三类概率）。
+**当前实现**：`PoissonPredictor`（泊松 Dixon-Coles 模型）——
+1. 从历史比赛计算每队攻防强度（场均进球/失球相对联赛均值）；
+2. 估计两队期望进球，按泊松分布展开比分概率矩阵（含 Dixon-Coles 低比分修正）；
+3. 汇总胜平负概率、期望进球、最可能比分、大小球概率；
+4. 支持**赔率融合**（欧赔隐含概率与泊松概率加权）与**让球胜平负**（给定让球数）。
 
-**后续扩展方向**（`base.py` 已留接口）：
-- 泊松模型（进球数建模）
-- 逻辑回归 / 梯度提升（特征：近期状态、主客场、历史交锋）
-- 引入 Elo 评分 / 球员伤停等特征
+## 对话式 agent（`app/agent/`）
+
+`PredictAgent` 用 DeepSeek 函数调用，把「查数据 + 跑模型」串起来，支持多轮追问。
+
+工具：`list_upcoming_matches`（未来赛事+赔率）、`get_team_stats`（球队统计）、`get_head_to_head`（历史交锋）、`get_team_players`（阵容）、`predict_match`（泊松预测，可带让球/赔率）。
 
 ## 统计分析（`app/analysis/`）
 
-**当前实现**：球队基础统计（场次 / 胜场 / 进球 / 失球 / 净胜球）。
-
-**后续扩展方向**：
-- 联赛积分榜（`league_table` 已留占位）
-- 进球效率、趋势、主客场对比
+`Analyzer` 提供 `team_stats`（场次/胜平负/进球/失球/场均）与 `league_table`（积分榜，含联赛维度、按积分/净胜球排序）。
 
 ## 配置（`app/core/config.py`）
 
-所有环境变量收敛到 `Settings` dataclass（frozen + lru_cache 单例），`.env` 通过 `python-dotenv` 加载。
-
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `DASHSCOPE_API_KEY` | — | DashScope key（必填） |
-| `EMBEDDING_MODEL` | `text-embedding-v2` | 嵌入模型 |
-| `LLM_MODEL` | `qwen-plus` | LLM 模型 |
-| `CHROMA_DIR` | `./chroma_data` | 向量库持久化目录 |
+| `LLM_API_KEY` | — | DeepSeek key（agent 用） |
+| `LLM_BASE_URL` | `https://api.deepseek.com` | DeepSeek OpenAI 兼容接口 |
+| `LLM_MODEL` | `deepseek-v4-pro` | LLM 模型名 |
 | `DATA_DIR` | `./data` | 数据目录 |
-| `DB_PATH` | `./data/football.db` | SQLite 结构化数据（比赛/赔率）落地路径 |
+| `DB_PATH` | `./data/football.db` | SQLite 落地路径 |

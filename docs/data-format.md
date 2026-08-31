@@ -1,56 +1,42 @@
 # 数据格式约定
 
-数据放入 `data/` 目录，本项目约定两种数据：**比赛记录**（供预测/统计）和**知识库文本**（供 RAG 问答）。
+数据通过爬虫采集后落 **SQLite**（`data/football.db`），共三张表：比赛、赔率、球员。数据源为 500 彩票网足彩页（`live.500.com/zucai.php?e={期号}`）。
 
-## 1. 比赛记录（CSV）
+## 1. 比赛表（matches）
 
-用于 `Predictor`（预测）和 `Analyzer`（统计），列名固定如下：
+| 列名 | 类型 | 说明 |
+|---|---|---|
+| `match_id` | TEXT | 赛事 ID（500 彩票网 fid，主键） |
+| `date` | TEXT | 比赛日期时间，如 `2026-08-30 21:00` |
+| `league` | TEXT | 联赛名（如「英超」） |
+| `home_team` / `away_team` | TEXT | 主 / 客队名（完整简体名） |
+| `home_goals` / `away_goals` | INTEGER | 全场比分（未开赛为 NULL） |
+| `home_halftime` / `away_halftime` | INTEGER | 半场比分（可空） |
+| `status` | TEXT | 比赛状态（「完场」/「未开赛」/「进行中」） |
 
-| 列名 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| `match_id` | int/str | 否 | 比赛唯一 ID |
-| `date` | str | 否 | 比赛日期，如 `2024-05-01` |
-| `league` | str | 否 | 联赛名，如 `英超` |
-| `home_team` | str | 是 | 主队名 |
-| `away_team` | str | 是 | 客队名 |
-| `home_goals` | int | 是 | 主队进球数 |
-| `away_goals` | int | 是 | 客队进球数 |
+> 默认排除国家队/世界杯联赛（世界杯、友谊赛、世外欧洲、世界杯附），只保留俱乐部比赛。
 
-**样例**（`data/matches.csv`）：
+## 2. 赔率表（odds）
 
-```csv
-match_id,date,league,home_team,away_team,home_goals,away_goals
-1,2024-05-01,英超,曼城,阿森纳,2,1
-2,2024-05-02,英超,利物浦,切尔西,3,1
-3,2024-05-03,英超,曼联,热刺,1,1
-```
+| 列名 | 类型 | 说明 |
+|---|---|---|
+| `match_id` | TEXT | 关联比赛 ID（主键） |
+| `home_win` / `draw` / `away_win` | REAL | 欧赔 1X2（主胜 / 平 / 客胜） |
+| `over_under` / `asian_handicap` | REAL | 大小球 / 亚盘（预留，暂未采集） |
 
-> 预测和统计的 `matches` DataFrame 都依赖这 4 个核心列：
-> `home_team / away_team / home_goals / away_goals`。
+## 3. 球员表（players）
 
-## 2. 知识库文本（RAG）
+| 列名 | 类型 | 说明 |
+|---|---|---|
+| `team_id` / `team_name` | TEXT | 所属球队 ID / 名 |
+| `name` | TEXT | 球员姓名 |
+| `number` / `position` / `nationality` | TEXT | 号码 / 位置 / 国籍 |
+| `age` / `height` / `weight` | TEXT | 年龄 / 身高 / 体重 |
+| `market_value` | TEXT | 身价，如「50万」 |
+| `appearances` / `goals` / `assists` | TEXT | 出场次数 / 进球 / 助攻 |
 
-导入向量库的文本，可以是任意描述性文本，建议以自然语言段落组织，方便检索。例如：
+## 4. 数据接入流程
 
-```text
-曼城在 2023-2024 赛季夺得英超冠军，38 轮取得 28 胜 7 平 3 负。
-核心球员哈兰德当赛季打进 27 球。
-```
-
-也可以是结构化文本：
-
-```text
-球队：曼城
-联赛：英超
-上赛季排名：第 1
-主场胜率：78%
-```
-
-导入方式：通过 `POST /api/ingest`（`text` 单段文本 + 可选 `source`，自动分块 + MD5 去重），或 Streamlit 页面。
-
-## 3. 数据接入流程
-
-1. 把数据文件放入 `data/` 目录
-2. 写一个导入脚本（或调 `/api/ingest`），把数据加载成 `pandas.DataFrame` / 文本列表
-3. 文本数据导入向量库 → RAG 问答可用
-4. 比赛记录交给 `Predictor` / `Analyzer` → 预测 / 统计可用
+1. 采集比赛/赔率：`PYTHONPATH=. ./.venv/Scripts/python.exe scripts/crawl_500.py {期号}`
+2. 采集球员：`PYTHONPATH=. ./.venv/Scripts/python.exe scripts/crawl_players.py`
+3. 球队名缓存：`data/team_names.json`（team_id → 完整名，`TeamNameResolver` 维护）

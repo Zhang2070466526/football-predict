@@ -65,6 +65,20 @@ class HttpClient:
         """POST JSON 并解析响应为 dict。"""
         return self._request("POST", url, json=json, headers=headers).json()
 
-    def get_text(self, url: str, *, params: dict | None = None, headers: dict | None = None) -> str:
-        """GET 并返回纯文本响应（用于抓取 HTML 页面）。"""
-        return self._request("GET", url, params=params, headers=headers).text
+    def get_text(
+        self,
+        url: str,
+        *,
+        params: dict | None = None,
+        headers: dict | None = None,
+        encoding: str | None = None,
+    ) -> str:
+        """GET 并返回纯文本响应（用于抓取 HTML 页面）。
+
+        参数：
+        - encoding: 用指定编码解码响应字节（如 "gb18030"）；None 则用 httpx 自动检测
+        """
+        resp = self._request("GET", url, params=params, headers=headers)
+        if encoding:
+            return resp.content.decode(encoding, errors="replace")
+        return resp.text

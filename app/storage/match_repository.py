@@ -11,6 +11,10 @@ import pandas as pd
 
 from app.models.match import Match
 from app.models.odds import Odds
+from app.models.player import Player
+
+# 国家队/世界杯相关联赛，默认从分析、预测、统计中排除（只保留俱乐部比赛）
+NATIONAL_LEAGUES = {"世界杯", "友谊赛", "世外欧洲", "世界杯附"}
 
 
 class MatchRepository:
@@ -43,13 +47,16 @@ class MatchRepository:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS matches (
-                    match_id    TEXT PRIMARY KEY,
-                    date        TEXT,
-                    league      TEXT,
-                    home_team   TEXT NOT NULL,
-                    away_team   TEXT NOT NULL,
-                    home_goals  INTEGER NOT NULL,
-                    away_goals  INTEGER NOT NULL
+                    match_id       TEXT PRIMARY KEY,
+                    date           TEXT,
+                    league         TEXT,
+                    home_team      TEXT NOT NULL,
+                    away_team      TEXT NOT NULL,
+                    home_goals     INTEGER,
+                    away_goals     INTEGER,
+                    home_halftime  INTEGER,
+                    away_halftime  INTEGER,
+                    status         TEXT
                 )
                 """
             )
@@ -65,6 +72,32 @@ class MatchRepository:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS players (
+                    team_id       TEXT NOT NULL,
+                    team_name     TEXT NOT NULL,
+                    name          TEXT NOT NULL,
+                    number        TEXT,
+                    position      TEXT,
+                    nationality   TEXT,
+                    age           TEXT,
+                    height        TEXT,
+                    weight        TEXT,
+                    market_value  TEXT,
+                    appearances   TEXT,
+                    goals         TEXT,
+                    assists       TEXT,
+                    PRIMARY KEY (team_id, name)
+                )
+                """
+            )
+            # 老库补列（幂等）
+            for col in ("appearances", "goals", "assists"):
+                try:
+                    conn.execute(f"ALTER TABLE players ADD COLUMN {col} TEXT")
+                except sqlite3.OperationalError:
+                    pass
 
     @staticmethod
     def _ensure_id(match: Match) -> str:
@@ -85,15 +118,17 @@ class MatchRepository:
         返回：写入条数
         """
         rows = [
-            (self._ensure_id(m), m.date, m.league, m.home_team, m.away_team, m.home_goals, m.away_goals)
+            (self._ensure_id(m), m.date, m.league, m.home_team, m.away_team,
+             m.home_goals, m.away_goals, m.home_halftime_goals, m.away_halftime_goals, m.status)
             for m in matches
         ]
         with self._conn() as conn:
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO matches
-                    (match_id, date, league, home_team, away_team, home_goals, away_goals)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (match_id, date, league, home_team, away_team, home_goals, away_goals,
+                     home_halftime, away_halftime, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -124,29 +159,47 @@ class MatchRepository:
 
     # ── 读取 ──
 
-    def load_matches(self, team: str | None = None, limit: int | None = None) -> pd.DataFrame:
+    def load_matches(
+        self,
+        team: str | None = None,
+        limit: int | None = None,
+        exclude_national: bool = True,
+    ) -> pd.DataFrame:
         """加载比赛为 DataFrame（列与 data-format.md 约定一致）。
 
         参数：
         - team: 只加载该球队参加的比赛（主或客），None 表示全部
         - limit: 最多返回条数（按 date 倒序取最近），None 表示全部
+        - exclude_national: 是否排除国家队/世界杯联赛（默认排除）
 
-        返回：列含 match_id/date/league/home_team/away_team/home_goals/away_goals
+        返回：列含 match_id/date/league/home_team/away_team/home_goals/away_goals 等
         """
         sql = (
-            "SELECT match_id, date, league, home_team, away_team, home_goals, away_goals "
-            "FROM matches"
+            "SELECT match_id, date, league, home_team, away_team, home_goals, away_goals, "
+            "home_halftime, away_halftime, status FROM matches"
         )
+        where: list[str] = []
         params: list = []
         if team:
-            sql += " WHERE home_team = ? OR away_team = ?"
+            where.append("(home_team = ? OR away_team = ?)")
             params += [team, team]
+        if exclude_national and NATIONAL_LEAGUES:
+            placeholders = ",".join("?" * len(NATIONAL_LEAGUES))
+            where.append(f"league NOT IN ({placeholders})")
+            params += list(NATIONAL_LEAGUES)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY date DESC"
         if limit:
             sql += " LIMIT ?"
             params.append(limit)
         with self._conn() as conn:
-            return pd.read_sql_query(sql, conn, params=params)
+            df = pd.read_sql_query(sql, conn, params=params)
+        # 比分列按整型返回（可空 Int64，未开赛为 None），避免 float 如 5.0
+        for col in ("home_goals", "away_goals", "home_halftime", "away_halftime"):
+            if col in df.columns:
+                df[col] = df[col].astype("Int64")
+        return df
 
     def load_odds(self, match_id: str | None = None) -> pd.DataFrame:
         """加载赔率为 DataFrame。
@@ -166,3 +219,50 @@ class MatchRepository:
         """返回已入库的比赛条数。"""
         with self._conn() as conn:
             return conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+
+    # ── 球员 ──
+
+    def save_players(self, players: list[Player]) -> int:
+        """批量写入球员（按 team_id + name 去重，已存在则覆盖）。
+
+        参数：
+        - players: 球员列表
+
+        返回：写入条数
+        """
+        rows = [
+            (p.team_id, p.team_name, p.name, p.number, p.position,
+             p.nationality, p.age, p.height, p.weight, p.market_value,
+             p.appearances, p.goals, p.assists)
+            for p in players
+        ]
+        with self._conn() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO players
+                    (team_id, team_name, name, number, position,
+                     nationality, age, height, weight, market_value, appearances, goals, assists)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def load_players(self, team_name: str | None = None) -> pd.DataFrame:
+        """加载球员为 DataFrame。
+
+        参数：
+        - team_name: 只加载该队球员，None 表示全部
+
+        返回：列含 team_id/team_name/name/number/position/nationality/age/height/weight/market_value
+        """
+        sql = (
+            "SELECT team_id, team_name, name, number, position, nationality, "
+            "age, height, weight, market_value, appearances, goals, assists FROM players"
+        )
+        params: list = []
+        if team_name:
+            sql += " WHERE team_name = ?"
+            params.append(team_name)
+        with self._conn() as conn:
+            return pd.read_sql_query(sql, conn, params=params)

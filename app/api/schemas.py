@@ -1,29 +1,23 @@
-"""API 请求/响应模型（Pydantic）。
-
-说明：请求 DTO 体积小、数量多，按 FastAPI 惯例集中放在一个文件，
-与「一文件一类」规范对领域模型（models/）的要求区分开。
-"""
+"""API 请求/响应模型（Pydantic）。"""
 from __future__ import annotations
 
 from pydantic import BaseModel
 
 
-class ChatRequest(BaseModel):
-    """RAG 问答请求。question: 用户问题；k: 检索片段数。"""
-
-    question: str
-    k: int = 4
-
-
 class PredictRequest(BaseModel):
-    """比赛预测请求。home_team/away_team: 主 / 客队名。"""
+    """比赛预测请求。home_team/away_team: 主 / 客队名；handicap: 让球数（可选）。"""
 
     home_team: str
     away_team: str
+    handicap: float | None = None
 
 
-class IngestRequest(BaseModel):
-    """文本导入请求。text: 待导入文本；source: 来源标注。"""
+class AgentRequest(BaseModel):
+    """对话式预测 agent 请求。
 
-    text: str
-    source: str = ""
+    - question: 当前问题
+    - history: 历史对话 [{"role": "user"/"assistant", "content": "..."}]，用于多轮追问
+    """
+
+    question: str
+    history: list[dict] | None = None
